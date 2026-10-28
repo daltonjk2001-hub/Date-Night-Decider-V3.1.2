@@ -1,35 +1,11 @@
 'use strict';
 
-/* Date Night Decider — Version 3.1.2 Product Engine
-   - Native Capacitor Bridge Integration
-   - RevenueCat In-App Purchase Architecture
-   - Hardened WebRTC TURN Relay Infrastructure */
-
-const Purchases = (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Purchases) || (typeof window !== 'undefined' && window.Purchases) || null;
+/* Date Night Decider — Version 3.4.3 Hotfix 8 Product Engine
+   - Native Capacitor Bridge & Adapter Integration
+   - RevenueCat & Native In-App Purchase Architecture
+   - Hardened WebRTC TURN Relay & Storage Protection */
 
 const getEl = id => document.getElementById(id);
-
-let db = null;
-let useMemoryFallback = typeof window.Dexie !== 'function';
-
-if (useMemoryFallback) {
-  console.warn('Dexie did not load. Running with temporary in-memory storage.');
-} else {
-  try {
-    db = new Dexie('DateNightDatabase');
-    db.version(1).stores({
-      settings: 'key',
-      customDeck: '++id, id',
-      deletedBuiltins: 'id',
-      categories: 'id',
-      history: '++id, date',
-      unlocks: 'id'
-    });
-  } catch (err) {
-    console.warn('IndexedDB is unavailable; using temporary in-memory state:', err);
-    useMemoryFallback = true;
-  }
-}
 
 const DEFAULT_CATEGORIES = [
   'baking', 'cooking', 'gaming', 'board games', 'tv', 'movie',
@@ -135,7 +111,6 @@ function sanitizeHistoryEntry(raw) {
   };
 }
 
-let customDeck = [];
 let deletedBuiltins = new Set();
 let unlockedItems = [];
 let dateHistory = [];
@@ -145,52 +120,7 @@ let activeDeck = [];
 let selectedPreviewItemId = null;
 let selectedCategories = [...DEFAULT_CATEGORIES];
 let selectedPacks = ['starter'];
-
-/* Production Unified Entitlement Identifiers */
-const ENTITLEMENT_IDS = {
-  ALL_EXPANSIONS: 'unlocked_expansion_packs',
-  PACK_ADVENTURE: 'expansion_adventure_pack',
-  PACK_COZY: 'expansion_cozy_pack',
-  PACK_GOURMET: 'expansion_gourmet_pack',
-  PACK_NIGHTOUT: 'expansion_nightout_pack',
-  PACK_BUDGET: 'expansion_budget_pack'
-};
-
-/* Secure Ephemeral ICE Server Configuration Function for PeerJS */
-async function fetchEphemeralIceServers() {
-  try {
-    const response = await fetch('/api/get-ice-servers', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ expiresInSeconds: 300 })
-    });
-
-    if (!response.ok) {
-      throw new Error(`ICE fetch failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.iceServers;
-  } catch (error) {
-    console.warn('Fallback to secure public STUN due to TURN token fetch failure:', error);
-    return [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
-    ];
-  }
-}
-
-let PEER_OPTIONS = {
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
-    ],
-    iceCandidatePoolSize: 10
-  }
-};
+let savedSelectedPacksPreference = null;
 
 function showToast(message, duration = 3500) {
   let container = getEl('toastContainer');
@@ -212,35 +142,31 @@ function showToast(message, duration = 3500) {
 }
 
 async function triggerHaptic(type = 'light') {
-  if (!['both', 'vibration'].includes(appSettings.feedback)) return;
-  if (window.Capacitor && window.Capacitor.isPluginAvailable('Haptics')) {
-    try {
-      const { Haptics, ImpactStyle, NotificationType } = window.Capacitor.Plugins;
-      if (type === 'light') await Haptics.impact({ style: ImpactStyle.Light });
-      else if (type === 'heavy') await Haptics.impact({ style: ImpactStyle.Heavy });
-      else if (type === 'success') await Haptics.notification({ type: NotificationType.Success });
-      return;
-    } catch (_) {}
+  if (window.DeviceAdapter) {
+    await window.DeviceAdapter.triggerHaptic(type, appSettings.feedback);
   }
-  if (!('vibrate' in navigator)) return;
-  try {
-    if (type === 'light') navigator.vibrate(15);
-    else if (type === 'success') navigator.vibrate([40, 60, 40]);
-    else if (type === 'heavy') navigator.vibrate(50);
-  } catch (_) {}
 }
 
-const audioCtx = (() => {
+let audioCtx = null;
+let audioGestureSeen = false;
+
+function unlockAudioAfterGesture() {
+  if (audioGestureSeen) return;
+  audioGestureSeen = true;
   try {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    return AudioContextClass ? new AudioContextClass() : null;
-  } catch (_) { return null; }
-})();
+    if (!AudioContextClass) return;
+    audioCtx = new AudioContextClass();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  } catch (error) {
+    console.debug('Web Audio is unavailable:', error);
+  }
+}
 
 function playSound(type) {
   if (!['both', 'sound'].includes(appSettings.feedback) || !audioCtx) return;
   try {
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.connect(gain);
@@ -298,77 +224,7 @@ const masterDeck = [
   { id:'arcade-02', title:'Blind Drawing Guess-Off', detail:'Take turns describing a simple object while the other person draws it without seeing a reference picture.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with paper and pens', duration:'15–20 minutes', equipment:['Paper','Pens or pencils'], mission:'Earn points for accurate guesses and funniest drawings.', howToPlay:['One player privately chooses a simple object and describes its shape in short steps.','The other draws based only on the description.','Reveal the object, award one point for a correct guess and one bonus point for the funniest result, then switch.'], gradient:'linear-gradient(135deg, #7e22ce, #701a75)' }
 ];
 
-const storeCatalog = [
-  { id: 'pack-viral', title: 'Pack 1: Viral Micro-Adventures', type: 'deck', price: '$0.99', desc: 'Seven unusual little adventures that turn ordinary places, objects, and memories into a date.', gradient: 'linear-gradient(135deg, #31103f, #190a24)' },
-  { id: 'pack-coop', title: 'Pack 2: Co-Op Worlds & Gaming Challenges', type: 'deck', price: '$0.99', desc: 'Seven cooperative challenges for couples who enjoy digital, tabletop, or creative building games.', gradient: 'linear-gradient(135deg, #064e3b, #022c22)' },
-  { id: 'pack-sweet', title: 'Pack 3: Sweet Treat Showdown', type: 'deck', price: '$0.99', desc: 'Seven relaxed dessert challenges, from a complete cookie recipe to quick no-bake creations.', gradient: 'linear-gradient(135deg, #4a1525, #831843)' },
-  { id: 'pack-quest', title: 'Pack 4: Around-Town Adventure Quest', type: 'deck', price: '$0.99', desc: 'Seven structured mini-outings with exact missions and free at-home alternatives.', gradient: 'linear-gradient(135deg, #1e293b, #0f172a)' },
-  { id: 'pack-arcade', title: 'Pack 5: The Couples Challenge Arcade', type: 'deck', price: '$0.99', desc: 'Seven quick head-to-head or cooperative challenges with simple scoring and zero special equipment.', gradient: 'linear-gradient(135deg, #581c87, #3b0764)' }
-];
-
-const expansionDecks = {
-  'pack-viral': [
-    { id:'viral-01', title:'Three-Stop Photo Safari', detail:'Find three interesting public places nearby and take a photo at each stop.', category:'micro-adventure', budget:'free', location:'out', costEstimate:'Free', duration:'30–45 minutes', equipment:['Phone camera'], mission:'Capture a tiny photo story in three stops.', howToPlay:['Choose a safe, walkable public route with three stops.','At each stop, take one photo that fits a prompt chosen by your partner.','Share the three photos and name your mini photo story.'], atHomeAlternative:'Take a photo safari around your home or yard.', gradient:'linear-gradient(135deg, #0f766e, #164e63)' },
-    { id:'viral-02', title:'One-Color Date', detail:'Choose a color and spend the date noticing or creating things that match it.', category:'micro-adventure', budget:'free', location:'home', costEstimate:'Free with what you have', duration:'20–40 minutes', equipment:['Optional phone camera'], mission:'Collect five things that match your chosen color.', howToPlay:['Each player secretly chooses a color; agree on one by a coin toss or quick vote.','Find five safe things that match it, indoors or on a walk.','Pick the most unexpected match and explain why you chose it.'], gradient:'linear-gradient(135deg, #0f766e, #134e4a)' },
-    { id:'viral-03', title:'Memory Lane Soundtrack', detail:'Build a mini soundtrack from songs that remind you of different moments in your relationship.', category:'micro-adventure', budget:'free', location:'home', costEstimate:'Free if you have music access', duration:'30 minutes', equipment:['Music app or owned tracks'], mission:'Choose one song for a memory, one for today, and one for your future.', howToPlay:['Take turns naming a memory or moment.','Choose a song that fits it and explain the connection.','Finish by picking a song for an adventure you want to share.'], gradient:'linear-gradient(135deg, #0f766e, #115e59)' },
-    { id:'viral-04', title:'Mystery Snack Tasting', detail:'Choose a few familiar snacks and rate them without seeing each other’s rankings.', category:'micro-adventure', budget:'paid', location:'home', costEstimate:'$3–$10 depending on snacks', duration:'20–30 minutes', equipment:['A few snacks','Plates'], mission:'Find your shared favorite and the most surprising flavor.', howToPlay:['Each person selects two or three snacks within the agreed budget.','Taste each one and privately rate it from 1 to 5.','Reveal ratings together and name the shared winner.'], importantRule:'Check allergies and dietary needs first; never use mystery ingredients.', gradient:'linear-gradient(135deg, #0f766e, #0c4a6e)' },
-    { id:'viral-05', title:'Tiny Tourist Challenge', detail:'Act like tourists in a familiar area and discover one detail you have never noticed.', category:'micro-adventure', budget:'free', location:'out', costEstimate:'Free; optional treat cost', duration:'30–60 minutes', equipment:['Phone camera optional'], mission:'Find a landmark, a hidden detail, and a place you would bring a visitor.', howToPlay:['Choose a familiar public area.','Each player picks one thing to investigate or photograph.','Share what you noticed and choose one new favorite spot.'], atHomeAlternative:'Explore a room or part of your home you rarely pay attention to.', gradient:'linear-gradient(135deg, #0f766e, #164e63)' },
-    { id:'viral-06', title:'No-Scroll Cozy Hour', detail:'Put phones away and invent a relaxed hour using only things already at home.', category:'micro-adventure', budget:'free', location:'home', costEstimate:'Free', duration:'60 minutes', equipment:['A timer optional'], mission:'Create an hour that feels different without buying anything.', howToPlay:['Each person suggests one cozy activity.','Choose a combination such as music, a puzzle, drawing, or a short walk.','Keep phones away except for emergencies and end by sharing the best moment.'], gradient:'linear-gradient(135deg, #0f766e, #134e4a)' },
-    { id:'viral-07', title:'Future Postcard Exchange', detail:'Write a postcard-style note to each other from an imagined future trip or milestone.', category:'micro-adventure', budget:'free', location:'home', costEstimate:'Free with paper', duration:'20–30 minutes', equipment:['Paper','Pens'], mission:'Describe a future memory as if it already happened.', howToPlay:['Pick an imaginary destination or future milestone.','Write each other a short postcard with two details you hope to experience.','Read them aloud and choose one idea to make real someday.'], gradient:'linear-gradient(135deg, #0f766e, #134e4a)' }
-  ],
-  'pack-coop': [
-    { id:'coop-01', title:'Co-Op Mission Marathon', detail:'Play a cooperative game and define three team goals before starting.', category:'gaming', budget:'free', location:'home', costEstimate:'Free using a game you own', duration:'30–60 minutes', equipment:['A cooperative video game'], mission:'Complete three team goals without blaming each other for mistakes.', howToPlay:['Choose a cooperative game you both can access.','Set three goals that fit one session.','Celebrate progress after each goal, even if you do not finish all of them.'], gradient:'linear-gradient(135deg, #064e3b, #022c22)' },
-    { id:'coop-02', title:'Build-a-World Relay', detail:'Take turns adding to one shared build in a game or with blocks and household craft supplies.', category:'gaming', budget:'free', location:'home', costEstimate:'Free using owned games or supplies', duration:'30–45 minutes', equipment:['Building game, blocks, or craft supplies'], mission:'Build one place that combines both of your ideas.', howToPlay:['Player 1 adds the foundation and explains the idea.','Player 2 adds a new feature without removing the first idea.','Alternate turns until you have a shared creation.'], gradient:'linear-gradient(135deg, #064e3b, #14532d)' },
-    { id:'coop-03', title:'Puzzle Partners', detail:'Choose a puzzle game or physical puzzle and solve it together under a relaxed time limit.', category:'gaming', budget:'free', location:'home', costEstimate:'Free using an owned puzzle or game', duration:'20–45 minutes', equipment:['Puzzle or puzzle game'], mission:'Solve one puzzle while explaining your thinking to each other.', howToPlay:['Pick a puzzle suited to both players.','Take turns proposing approaches; the other person gets to test the idea.','If you get stuck, allow one hint and keep going.'], gradient:'linear-gradient(135deg, #064e3b, #022c22)' },
-    { id:'coop-04', title:'Co-Op Challenge Wheel', detail:'Write five small game challenges and randomly choose which one to attempt together.', category:'gaming', budget:'free', location:'home', costEstimate:'Free with a game you own', duration:'30 minutes', equipment:['A game you both can access','Paper optional'], mission:'Complete three randomly selected team challenges.', howToPlay:['Write five doable challenges for your chosen game.','Randomly pick one and attempt it as a team.','Repeat until you complete three or agree on a new challenge.'], gradient:'linear-gradient(135deg, #064e3b, #166534)' },
-    { id:'coop-05', title:'Board Game Teach-Back', detail:'Choose a board game one of you knows and learn it by having the teacher explain only one step at a time.', category:'board games', budget:'free', location:'home', costEstimate:'Free using a game you own', duration:'30–60 minutes', equipment:['A board or card game'], mission:'Learn a game together without rushing through the rules.', howToPlay:['Choose a game you already own.','The experienced player explains the goal and first turn only.','Play a practice round, then add any remaining rules before the real game.'], gradient:'linear-gradient(135deg, #064e3b, #312e81)' },
-    { id:'coop-06', title:'Two-Person Tabletop Campaign', detail:'Create a short, silly story using a tabletop game, cards, dice, or paper prompts.', category:'board games', budget:'free', location:'home', costEstimate:'Free with household materials', duration:'30–45 minutes', equipment:['Paper or cards','Dice optional'], mission:'Make a tiny story with a beginning, twist, and ending.', howToPlay:['Each person invents a character and one goal.','Take turns drawing a card or rolling a die to introduce a complication.','Work together to resolve the story in three scenes.'], gradient:'linear-gradient(135deg, #064e3b, #1e3a8a)' },
-    { id:'coop-07', title:'Friendly Rematch League', detail:'Play three short rounds of a game and score the session on teamwork, creativity, and laughs—not just wins.', category:'board games', budget:'free', location:'home', costEstimate:'Free using an owned game', duration:'30–45 minutes', equipment:['A quick game'], mission:'Finish a three-round mini league and award playful titles.', howToPlay:['Choose a game that supports quick rounds.','After each round, give one point for teamwork, one for creativity, and one for the funniest moment.','Total the points and invent a silly award for each player.'], gradient:'linear-gradient(135deg, #064e3b, #312e81)' }
-  ],
-  'pack-sweet': [
-    { id:'sweet-01', title:'Decorate-the-Same Dessert', detail:'Bake or buy a simple dessert base, then decorate two versions from the same set of toppings.', category:'baking', budget:'paid', location:'home', costEstimate:'$5–$12 depending on ingredients', duration:'30–60 minutes', equipment:['Cookies or cupcakes','Simple toppings'], mission:'Make two desserts that look totally different but share the same ingredients.', howToPlay:['Choose a dessert base and agree on toppings.','Decorate each other’s dessert or make one each.','Reveal them together and choose playful award categories.'], importantRule:'Check allergies and keep food preparation hygienic.', gradient:'linear-gradient(135deg, #4a1525, #831843)' },
-    { id:'sweet-02', title:'Two-Flavor Cookie Test', detail:'Make one simple cookie dough and split it into two portions with different mix-ins.', category:'baking', budget:'paid', location:'home', costEstimate:'$6–$12 for ingredients', duration:'45–75 minutes', equipment:['Cookie ingredients','Mix-ins'], mission:'Test two flavor combinations and crown the shared favorite.', howToPlay:['Pick a basic cookie recipe.','Divide the dough and add a different mix-in to each half.','Bake safely, taste when cooled, and rate both flavors.'], importantRule:'Check dietary restrictions and follow the recipe’s baking instructions.', gradient:'linear-gradient(135deg, #4a1525, #9f1239)' },
-    { id:'sweet-03', title:'No-Bake Sweet Creation', detail:'Create a no-bake dessert using ingredients you already have or choose within a set budget.', category:'baking', budget:'paid', location:'home', costEstimate:'$3–$10 depending on ingredients', duration:'20–35 minutes', equipment:['No-bake dessert ingredients'], mission:'Make a dessert that looks fancy without using the oven.', howToPlay:['Choose a safe no-bake recipe.','Divide tasks so both people contribute.','Plate the dessert and give it a restaurant-style name.'], importantRule:'Keep perishable ingredients refrigerated as needed.', gradient:'linear-gradient(135deg, #4a1525, #701a75)' },
-    { id:'sweet-04', title:'Mystery Pantry Bake-Off', detail:'Choose three compatible ingredients from your pantry and use them to inspire a simple baked treat.', category:'baking', budget:'paid', location:'home', costEstimate:'$5–$15 depending on what you have', duration:'45–75 minutes', equipment:['Pantry ingredients','Baking tools'], mission:'Invent a flavor combination that still makes sense as dessert.', howToPlay:['Agree on a small ingredient budget and check what is available.','Choose three inspiration ingredients that work safely together.','Use a reliable recipe as the base and add your twist.'], importantRule:'Do not use unknown ingredients; check allergens and food safety.', gradient:'linear-gradient(135deg, #4a1525, #831843)' },
-    { id:'sweet-05', title:'Dessert Plating Contest', detail:'Plate the same dessert in two different styles and present each like a restaurant special.', category:'baking', budget:'paid', location:'home', costEstimate:'$4–$12 depending on dessert', duration:'20–30 minutes', equipment:['Dessert','Plates','Optional fruit or sauce'], mission:'Make an everyday dessert look celebration-worthy.', howToPlay:['Pick one dessert.','Each person plates a portion in their own style.','Present the dish and judge creativity, neatness, and taste.'], gradient:'linear-gradient(135deg, #4a1525, #9f1239)' },
-    { id:'sweet-06', title:'Sweet-and-Salty Pairing', detail:'Build a small tasting plate that contrasts sweet and salty flavors.', category:'baking', budget:'paid', location:'home', costEstimate:'$4–$10 depending on snacks', duration:'20–30 minutes', equipment:['A few sweet and salty snacks'], mission:'Find a pairing that tastes better together than separately.', howToPlay:['Choose three small sweet and salty combinations.','Taste each combination and discuss the contrast.','Pick a favorite and write down the winning pairing.'], importantRule:'Check allergies and dietary requirements before tasting.', gradient:'linear-gradient(135deg, #4a1525, #701a75)' },
-    { id:'sweet-07', title:'Breakfast-for-Dessert Bake', detail:'Make a sweet breakfast-inspired treat together, such as cinnamon toast bites or baked fruit crumble.', category:'baking', budget:'paid', location:'home', costEstimate:'$5–$12 for ingredients', duration:'30–60 minutes', equipment:['Simple baking ingredients','Oven-safe dish if needed'], mission:'Turn a familiar breakfast flavor into a cozy dessert.', howToPlay:['Choose a recipe that matches your time and equipment.','Split preparation tasks and prepare the treat together.','Serve it as dessert and name your creation.'], importantRule:'Use oven mitts and follow safe cooking temperatures.', gradient:'linear-gradient(135deg, #4a1525, #831843)' }
-  ],
-  'pack-quest': [
-    { id:'questpack-01', title:'Three-Clue Destination Quest', detail:'One partner creates three clues leading to a safe public destination; the other solves them along the way.', category:'quest', budget:'free', location:'out', costEstimate:'Free; optional snack cost', duration:'30–60 minutes', equipment:['Paper or phone notes'], mission:'Reach a destination by solving three simple clues.', howToPlay:['Choose a familiar public route and a safe destination.','Write three clues based on public landmarks.','Take turns solving each clue before moving on.'], importantRule:'Do not trespass or use clues that require unsafe travel.', gradient:'linear-gradient(135deg, #1e293b, #0f172a)' },
-    { id:'questpack-02', title:'Local Landmark Bingo', detail:'Make a short bingo card of visible things you might notice during a neighborhood walk.', category:'quest', budget:'free', location:'out', costEstimate:'Free', duration:'30–45 minutes', equipment:['Paper or phone notes'], mission:'Spot five bingo items during a walk together.', howToPlay:['Write nine things visible from public areas, such as a mural, a red door, or a bird.','Walk a safe route and mark each item you spot.','First to five wins, or complete the whole card as a team.'], importantRule:'Stay aware of traffic and surroundings while walking.', gradient:'linear-gradient(135deg, #1e293b, #1d4ed8)' },
-    { id:'questpack-03', title:'At-Home Escape Clues', detail:'Build a mini escape-room chain with clues hidden around one room.', category:'quest', budget:'free', location:'home', costEstimate:'Free with household items', duration:'20–40 minutes', equipment:['Paper','Pens','Household objects'], mission:'Solve three linked clues to reveal a final message.', howToPlay:['Choose a final answer or message.','Write three clues that lead to it and place them in ordinary, safe spots.','Let your partner solve the clues, then switch roles.'], importantRule:'Do not lock doors or hide anything near hazards.', gradient:'linear-gradient(135deg, #1e293b, #312e81)' },
-    { id:'questpack-04', title:'Secret Compliment Trail', detail:'Leave a sequence of clues that reveal small compliments or favorite memories.', category:'quest', budget:'free', location:'home', costEstimate:'Free with paper', duration:'15–30 minutes', equipment:['Small notes','Pen'], mission:'Make the final clue reveal a thoughtful message.', howToPlay:['Write three sincere compliments or memories.','Attach a simple clue to each note.','Let your partner follow the trail, then swap and repeat.'], gradient:'linear-gradient(135deg, #1e293b, #4c1d95)' },
-    { id:'questpack-05', title:'Park Detail Discovery', detail:'Visit a public park and choose a small observation challenge instead of a long hike.', category:'quest', budget:'free', location:'out', costEstimate:'Free', duration:'25–45 minutes', equipment:['Phone camera optional'], mission:'Find a natural pattern, a peaceful spot, and something that makes you smile.', howToPlay:['Choose a park and a comfortable route.','Each player picks one thing to observe without disturbing wildlife or plants.','Share observations and choose your favorite spot.'], importantRule:'Follow park rules and leave plants, animals, and surroundings undisturbed.', gradient:'linear-gradient(135deg, #1e293b, #14532d)' },
-    { id:'questpack-06', title:'The $5-or-Free Quest', detail:'Plan a tiny outing that costs no more than five dollars total—or costs nothing.', category:'quest', budget:'free', location:'out', costEstimate:'Free to $5 total', duration:'30–60 minutes', equipment:['None required'], mission:'Find a fun shared experience without breaking the budget.', howToPlay:['Agree on a total spending limit of $0–$5.','Choose a free public destination or an inexpensive shared treat.','At the end, name the best moment that cost nothing.'], importantRule:'Travel costs may vary; keep the agreed budget realistic.', gradient:'linear-gradient(135deg, #1e293b, #0f766e)' },
-    { id:'questpack-07', title:'Memory Map Quest', detail:'Draw a tiny map of places that have mattered to your relationship or friendship.', category:'quest', budget:'free', location:'home', costEstimate:'Free with paper', duration:'20–40 minutes', equipment:['Paper','Pens'], mission:'Create a map with three places and the story behind each one.', howToPlay:['Sketch a simple map, real or imaginary.','Mark three meaningful places and add a short memory to each.','Trade maps and ask one question about each place.'], gradient:'linear-gradient(135deg, #1e293b, #312e81)' }
-  ],
-  'pack-arcade': [
-    { id:'arcadepack-01', title:'Paper Ball Bullseye', detail:'Use soft paper balls and a bin to make a three-round target contest.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with scrap paper and a bin', duration:'10–20 minutes', equipment:['Scrap paper','Bin or basket'], mission:'Score points by landing paper balls in the target.', howToPlay:['Place a bin at a safe, agreed distance.','Give each player five paper-ball throws per round.','Play three rounds, moving the target slightly farther away if both agree.'], importantRule:'Use paper only and keep the area clear of fragile items.', gradient:'linear-gradient(135deg, #581c87, #3b0764)' },
-    { id:'arcadepack-02', title:'Speed Stack Showdown', detail:'Race to stack and unstack a safe set of cups or lightweight containers.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with cups or containers', duration:'10–15 minutes', equipment:['Lightweight cups or containers'], mission:'Complete three rounds without knocking over the stack.', howToPlay:['Build a simple pyramid with lightweight cups.','Time each player stacking and unstacking it.','Best two of three rounds wins.'], importantRule:'Use lightweight items and a stable surface.', gradient:'linear-gradient(135deg, #581c87, #701a75)' },
-    { id:'arcadepack-03', title:'One-Minute Drawing Duel', detail:'Draw the same silly prompt in one minute, then compare the results.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with paper and pens', duration:'10–20 minutes', equipment:['Paper','Pens'], mission:'Create a recognizable drawing under a one-minute timer.', howToPlay:['Choose a prompt such as a dragon, robot, or dream house.','Set a one-minute timer and draw without looking at each other’s work.','Reveal drawings and award points for funniest, most creative, and most recognizable.'], gradient:'linear-gradient(135deg, #581c87, #4c1d95)' },
-    { id:'arcadepack-04', title:'Song Intro Challenge', detail:'Play a short intro from music you can legally access and guess the song or artist.', category:'arcade', budget:'free', location:'home', costEstimate:'Free if you have music access', duration:'15–25 minutes', equipment:['Music app or owned tracks'], mission:'Get the most correct guesses across ten songs.', howToPlay:['Each person queues five songs without showing the screen.','Play a few seconds of each intro and let the other guess title or artist.','Award one point per correct answer, then swap roles.'], gradient:'linear-gradient(135deg, #581c87, #312e81)' },
-    { id:'arcadepack-05', title:'Memory Tray Challenge', detail:'Study a tray of safe household objects briefly, then see how many each person remembers.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with household objects', duration:'10–20 minutes', equipment:['6–12 safe household objects','Tray or table'], mission:'Remember as many objects as possible after a short look.', howToPlay:['Place 6–12 safe objects on a tray.','Study them for 20 seconds, then cover them.','Write down as many as you remember and switch who arranges the tray.'], importantRule:'Avoid sharp, breakable, or hazardous objects.', gradient:'linear-gradient(135deg, #581c87, #4c1d95)' },
-    { id:'arcadepack-06', title:'No-Laugh Challenge', detail:'Take turns telling a harmless silly story or making a funny face while the other tries to keep a straight face.', category:'arcade', budget:'free', location:'home', costEstimate:'Free', duration:'10–15 minutes', equipment:['None'], mission:'Stay serious for one minute, then swap roles.', howToPlay:['Agree on a one-minute round.','Take turns using harmless jokes, funny voices, or expressions.','Award one point each time the other player laughs; low score wins.'], gradient:'linear-gradient(135deg, #581c87, #701a75)' },
-    { id:'arcadepack-07', title:'Best-of-Five Quickfire', detail:'Pick five short challenges from this pack and play them as a mini tournament.', category:'arcade', budget:'free', location:'home', costEstimate:'Free with household items', duration:'20–35 minutes', equipment:['Paper and pen optional','Safe household items'], mission:'Earn the most points across five quick challenges.', howToPlay:['Choose five short challenges and agree on fair rules.','Play each challenge once and record a point for each round won.','Total the scores and invent a funny championship title.'], gradient:'linear-gradient(135deg, #581c87, #3b0764)' }
-  ]
-};
-
-let p1Deck = [], p2Deck = [], p1Likes = [], p2Likes = [];
-let swipePlayer = 1, swipeIndex = 0, draftItems = [], draftTurn = 1;
-let peer = null, conn = null, remoteRoomId = null, myPlayerNum = 1, currentRoomPeerId = null;
-let remoteSubmitSent = false;
-let guestRoundId = null;
-let pendingCompleteEntry = null;
-
-let remotePartnerLikes = null;
-let remoteMatchResolved = false;
-let p2HeartbeatTimer = null;
-let connectionState = 'disconnected';
-
-let isDragging = false, startX = 0, currentX = 0, startTime = 0;
-let swipeCardEl = null;
-window.currentWinner = null;
+let swipeLocked = false;
 
 const shuffle = array => {
   const out = [...array];
@@ -427,9 +283,11 @@ function renderPackChoices() {
 }
 
 function refreshDecks() {
-  const libraryCards = [...masterDeck, ...customDeck];
+  const libraryCards = [...masterDeck];
   unlockedItems.forEach(packId => {
-    if (expansionDecks[packId]) libraryCards.push(...expansionDecks[packId]);
+    if (window.expansionDecks && window.expansionDecks[packId]) {
+      libraryCards.push(...window.expansionDecks[packId]);
+    }
   });
   fullDeck = libraryCards.filter(item => !deletedBuiltins.has(item.id));
 
@@ -438,11 +296,16 @@ function refreshDecks() {
     selectedCategories = [...checkboxes].filter(input => input.checked).map(input => input.value);
   }
 
+  if (!(remoteRoomId && myPlayerNum === 2)) {
+    selectedPacks = ['starter', ...unlockedItems.filter(id =>
+      window.expansionDecks && Array.isArray(window.expansionDecks[id])
+    )];
+  }
   const chosenCards = [];
-  if (selectedPacks.includes('starter')) chosenCards.push(...masterDeck, ...customDeck);
-  unlockedItems.forEach(packId => {
-    if (selectedPacks.includes(packId) && expansionDecks[packId]) {
-      chosenCards.push(...expansionDecks[packId]);
+  selectedPacks.forEach(packId => {
+    if (packId === 'starter') chosenCards.push(...masterDeck);
+    else if (window.expansionDecks && Array.isArray(window.expansionDecks[packId])) {
+      chosenCards.push(...window.expansionDecks[packId]);
     }
   });
 
@@ -466,7 +329,7 @@ async function applyPackFilter() {
     (remoteRoomId && myPlayerNum === 2 && previousPacks.includes(packId))
   ))];
 
-  if (!useMemoryFallback && db && !(remoteRoomId && myPlayerNum === 2)) {
+  if (!storageFailed && db && !(remoteRoomId && myPlayerNum === 2)) {
     try { await db.settings.put({ key: 'selectedPacks', value: selectedPacks }); }
     catch (err) { console.error('Could not save selected packs:', err); }
   }
@@ -488,7 +351,7 @@ async function applyPackFilter() {
 
 async function applyCategoryFilter() {
   selectedCategories = [...document.querySelectorAll('.category-choice:checked')].map(input => input.value);
-  if (!useMemoryFallback && db) {
+  if (!storageFailed && db) {
     try { await db.categories.put({ id: 'selectedCats', values: selectedCategories }); }
     catch (err) { console.error('Could not save category filters:', err); }
   }
@@ -517,7 +380,7 @@ function setAllCategories(checked) {
 }
 
 function switchGame(mode, button = null) {
-  const allowedViews = new Set(['matcher', 'surprise', 'history', 'library', 'store']);
+  const allowedViews = new Set(['home', 'matcher', 'surprise', 'history', 'library', 'store', 'settings']);
   if (!allowedViews.has(mode)) return;
 
   const picker = getEl('categoryPicker');
@@ -529,16 +392,40 @@ function switchGame(mode, button = null) {
   document.querySelectorAll('.game-card').forEach(card => card.classList.remove('active-mode'));
   target.classList.add('active-mode');
 
-  if (mode === 'matcher' || mode === 'surprise') {
-    const primaryButton = button || document.querySelector(`.nav-tab[data-mode="${mode}"]`);
-    document.querySelectorAll('.nav-tab').forEach(tab => tab.classList.remove('active'));
-    if (primaryButton) primaryButton.classList.add('active');
-  }
+  const isDecide = mode === 'matcher' || mode === 'surprise';
+  const tabKey = (mode === 'home' || isDecide) ? 'decide' :
+    (mode === 'store' || mode === 'library') ? 'packs' : mode;
+
+  document.querySelectorAll('.app-nav-tab').forEach(tab => {
+    const active = tab.dataset.appTab === tabKey;
+    tab.classList.toggle('active', active);
+    if (active) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  });
+
+  document.querySelectorAll('.nav-tab').forEach(tab => {
+    const active = tab.dataset.mode === mode;
+    tab.classList.toggle('active', active);
+  });
+
+  const bottomNav = document.querySelector('.app-bottom-nav');
+  if (bottomNav) bottomNav.hidden = mode === 'matcher';
+  document.body.classList.toggle('matcher-fullscreen', mode === 'matcher');
+
+  const matcherBackButton = getEl('matcherBackButton');
+  if (matcherBackButton) matcherBackButton.hidden = mode !== 'matcher';
+
+  const filters = document.querySelector('.filter-bar');
+  if (filters) filters.hidden = !isDecide;
+  const tracker = document.querySelector('.tracker-strip');
+  if (tracker) tracker.hidden = !isDecide;
+  const modeNav = document.querySelector('.nav-grid');
+  if (modeNav) modeNav.hidden = !isDecide;
 
   if (mode === 'matcher') updateSwipeCard();
   if (mode === 'library') renderLibrary();
   if (mode === 'history') renderHistory();
-  if (mode === 'store') renderStore();
+  if (mode === 'store' && typeof renderStore === 'function') renderStore();
 }
 
 document.addEventListener('click', event => {
@@ -560,6 +447,8 @@ function initMatcher() {
   swipeIndex = 0;
   remoteSubmitSent = false;
   remotePartnerLikes = null;
+  remoteGuestProgressLikes = [];
+  remoteGuestSwipeIndex = 0;
   remoteMatchResolved = false;
   window.currentWinner = null;
   draftItems = [];
@@ -574,14 +463,32 @@ function initMatcher() {
 function updateConnectionBanner() {
   const statusBanner = getEl('connectionStatusBanner');
   if (!statusBanner) return;
+
+  // Keep the connected state unobtrusive; show the banner again if the
+  // connection is waiting, disconnected, or trying to reconnect.
+  if (remoteRoomId && conn && conn.open) {
+    statusBanner.style.display = 'none';
+    statusBanner.textContent = '';
+    return;
+  }
+
   if (remoteRoomId) {
     statusBanner.style.display = 'block';
+    const signalingNote = PEER_SIGNALING_CONFIG.host ? 'private signaling' : 'public PeerJS signaling';
+    const relayNote = turnRelayUnavailable ? ' · STUN-only best effort; some mobile networks may fail' : ' · relay configuration available';
     if (conn && conn.open) {
       statusBanner.className = 'connection-status-banner connected';
-      statusBanner.textContent = `🟢 Connected to Room "${remoteRoomId}" (Player ${myPlayerNum})`;
+      statusBanner.textContent = `🟢 Connected to Room "${remoteRoomId}" (Player ${myPlayerNum}) · ${signalingNote}${relayNote}`;
     } else {
       statusBanner.className = 'connection-status-banner disconnected';
-      statusBanner.textContent = `🔴 ${connectionState === 'waiting' ? 'Waiting for partner to join...' : 'Disconnected from room. Reconnecting...'}`;
+      const disconnectText = connectionState === 'waiting'
+        ? 'Waiting for partner to join...'
+        : myPlayerNum === 1
+          ? 'Partner disconnected — waiting for them to reconnect...'
+          : connectionState === 'connecting'
+            ? 'Connecting to live room...'
+            : 'Disconnected from room. Reconnecting...';
+      statusBanner.textContent = `🔴 ${disconnectText} · ${signalingNote}${relayNote}`;
     }
   } else {
     statusBanner.style.display = 'none';
@@ -596,6 +503,7 @@ function updateSwipeCard() {
   if (!header || !cardEl) return;
 
   updateConnectionBanner();
+  if (typeof saveHostRoomSessionState === 'function') saveHostRoomSessionState();
 
   const curDeck = currentSwipeDeck();
   if (!curDeck.length) {
@@ -623,6 +531,8 @@ function updateSwipeCard() {
 
     if (metaEl) metaEl.replaceChildren();
     if (venueHint) venueHint.style.display = 'none';
+    const announcer = getEl('cardAnnouncer');
+    if (announcer) announcer.textContent = 'No matching date ideas. Adjust your packs, categories, or budget filters.';
     return;
   }
 
@@ -660,6 +570,8 @@ function updateSwipeCard() {
       cardEl.style.background = '#1f122e';
       if (metaEl) metaEl.replaceChildren();
       if (venueHint) venueHint.style.display = 'none';
+      const announcer = getEl('cardAnnouncer');
+      if (announcer) announcer.textContent = `Swiping complete. ${header.textContent}`;
       return;
     }
 
@@ -680,7 +592,9 @@ function updateSwipeCard() {
   const catEl = getEl('cardCategory'); if (catEl) catEl.textContent = item.category || 'Date idea';
   const titleEl = getEl('cardTitle'); if (titleEl) titleEl.textContent = item.title || 'Untitled date';
   const detailEl = getEl('cardDetail'); if (detailEl) detailEl.textContent = item.detail || '';
-  
+  const announcer = getEl('cardAnnouncer');
+  if (announcer) announcer.textContent = `${item.category || 'Date idea'}: ${item.title || 'Untitled date'}. ${item.detail || ''}`;
+
   if (metaEl) {
     const locLabel = item.location === 'home'
       ? '🏠 Stay Home'
@@ -703,6 +617,7 @@ function updateSwipeCard() {
 }
 
 function handleSwipe(liked) {
+  if (swipeLocked) return;
   const curDeck = currentSwipeDeck();
 
   if (remoteRoomId && (!conn || !conn.open)) {
@@ -710,6 +625,9 @@ function handleSwipe(liked) {
     return;
   }
   if (!curDeck.length || swipeIndex >= curDeck.length) return;
+
+  swipeLocked = true;
+  window.setTimeout(() => { swipeLocked = false; }, 320);
 
   const likes = remoteRoomId
     ? (myPlayerNum === 1 ? p1Likes : p2Likes)
@@ -719,6 +637,10 @@ function handleSwipe(liked) {
   triggerHaptic('light');
   if (liked) likes.push(curDeck[swipeIndex]);
   swipeIndex += 1;
+  if (remoteRoomId && conn && conn.open) {
+    const currentLikes = myPlayerNum === 1 ? p1Likes : p2Likes;
+    sendP2PMessage({ type: 'SWIPE_PROGRESS', player: myPlayerNum, swipeIndex, likedIds: currentLikes.map(item => item.id) });
+  }
   updateSwipeCard();
 }
 
@@ -729,6 +651,7 @@ function installSwipeGestures() {
   swipeCardEl.addEventListener('touchstart', dragStart, { passive: true });
 
   function dragStart(event) {
+    if (swipeLocked) return;
     const deck = currentSwipeDeck();
     if (swipeIndex >= deck.length || (remoteRoomId && (!conn || !conn.open))) return;
     isDragging = true;
@@ -831,7 +754,9 @@ function showNoMutualMatches() {
   const detail = getEl('votingModalDetail');
   const container = getEl('votingShortlistContainer');
   const actions = getEl('noMatchesActions');
+  const draftTurnHeader = getEl('draftTurnHeader');
 
+  if (draftTurnHeader) draftTurnHeader.hidden = true;
   if (eyebrow) eyebrow.textContent = 'No Mutual Matches';
   if (title) title.textContent = 'Nothing Matched This Round';
   if (detail) detail.textContent = 'You both need to like the same idea for it to enter the elimination draft. No unrelated suggestions will be added. Adjust your selected packs or categories and play another round.';
@@ -920,6 +845,7 @@ function startMutualDraft(items) {
 function renderDraftGrid() {
   const header = getEl('draftTurnHeader');
   if (header) {
+    header.hidden = false;
     header.textContent = remoteRoomId
       ? `Live Room (${remoteRoomId}) · Player ${draftTurn}'s Turn to Ban`
       : `Player ${draftTurn}'s Turn to Ban`;
@@ -967,6 +893,7 @@ function renderDraftGrid() {
     }
     grid.appendChild(tile);
   });
+  if (typeof saveHostRoomSessionState === 'function') saveHostRoomSessionState();
 }
 
 function executeBan(index) {
@@ -1063,186 +990,6 @@ function renderLibrary() {
   });
 }
 
-function renderStore() {
-  const grid = getEl('storeGrid');
-  const summary = getEl('storeSummary');
-  if (!grid) return;
-  if (summary) summary.textContent = `${storeCatalog.length} packs available · ${unlockedItems.length} unlocked`;
-  grid.replaceChildren();
-  storeCatalog.forEach(item => {
-    const unlocked = unlockedItems.includes(item.id);
-    const card = document.createElement('article');
-    card.className = 'library-item store-tile';
-    card.style.background = item.gradient || '#1f122e';
-    const category = document.createElement('div');
-    category.className = 'library-category';
-    category.textContent = `EXPANSION PACK · ${item.price}`;
-    const title = document.createElement('div');
-    title.className = 'library-title';
-    title.textContent = item.title;
-    const detail = document.createElement('div');
-    detail.className = 'library-detail';
-    detail.textContent = item.desc;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `primary-btn${unlocked ? ' secondary-action-btn' : ''}`;
-    button.style.marginTop = '10px';
-    button.style.padding = '8px 12px';
-    button.style.fontSize = '0.8rem';
-    button.textContent = unlocked ? '✅ Unlocked & Available' : `🔓 Unlock Pack · ${item.price}`;
-    button.addEventListener('click', () => openStorePreview(item.id));
-    card.append(category, title, detail, button);
-    grid.appendChild(card);
-  });
-}
-
-function openStorePreview(itemId) {
-  const item = storeCatalog.find(entry => entry.id === itemId);
-  if (!item) return;
-  selectedPreviewItemId = itemId;
-  const storeModalTitle = getEl('storeModalTitle'); if (storeModalTitle) storeModalTitle.textContent = item.title;
-  const storeModalDesc = getEl('storeModalDesc'); if (storeModalDesc) storeModalDesc.textContent = item.desc;
-  const unlocked = unlockedItems.includes(itemId);
-  const actionButton = getEl('storeModalActionBtn');
-  if (actionButton) {
-    actionButton.textContent = unlocked ? 'Already Unlocked' : `Unlock Pack · ${item.price}`;
-    actionButton.disabled = unlocked;
-  }
-
-  const list = getEl('storeModalCardsList');
-  if (list) {
-    list.replaceChildren();
-    (expansionDecks[itemId] || []).forEach(card => {
-      const wrapper = document.createElement('div');
-      wrapper.style.background = '#1f122e';
-      wrapper.style.border = '1px solid var(--border)';
-      wrapper.style.borderRadius = '8px';
-      wrapper.style.padding = '8px 10px';
-      const meta = document.createElement('div');
-      meta.style.cssText = 'font-size:0.65rem;color:var(--gold);font-weight:800;text-transform:uppercase;';
-      meta.textContent = `${card.category} · ${card.location} · Budget: ${card.budget}`;
-      const title = document.createElement('div');
-      title.style.cssText = 'font-size:0.85rem;font-weight:900;color:var(--cream);';
-      title.textContent = card.title;
-      const detail = document.createElement('div');
-      detail.style.cssText = 'font-size:0.75rem;color:var(--muted);';
-      detail.textContent = card.detail;
-      wrapper.append(meta, title, detail);
-      list.appendChild(wrapper);
-    });
-  }
-  const previewModal = getEl('storePreviewModal');
-  if (previewModal) previewModal.classList.add('show');
-}
-
-function closeStorePreview() {
-  const previewModal = getEl('storePreviewModal');
-  if (previewModal) previewModal.classList.remove('show');
-  selectedPreviewItemId = null;
-}
-
-async function actionFromPreviewModal() {
-  if (!selectedPreviewItemId) return;
-  const itemId = selectedPreviewItemId;
-  closeStorePreview();
-  await handleStoreAction(itemId);
-}
-
-/* Production Refactored Native Billing Framework via RevenueCat */
-async function handleStoreAction(itemId) {
-  if (unlockedItems.includes(itemId)) {
-    showToast('This pack is already unlocked on this device.');
-    return;
-  }
-
-  if (window.Capacitor && window.Capacitor.isNativePlatform() && Purchases) {
-    try {
-      showToast('Connecting to app store billing...');
-      const offerings = await Purchases.getOfferings();
-      if (offerings.current) {
-        const pkg = offerings.current.availablePackages.find(
-          p => p.product.identifier === `com.datenightdecider.${itemId.replace('-', '.')}`
-        );
-        if (pkg) {
-          const { customerInfo } = await Purchases.purchasePackage({ package: pkg });
-          if (customerInfo.entitlements.active[ENTITLEMENT_IDS.ALL_EXPANSIONS] || customerInfo.entitlements.active[itemId]) {
-            await applySuccessfulUnlock(itemId);
-            return;
-          }
-        }
-      }
-    } catch (err) {
-      if (!err.userCancelled) {
-        showToast(`Store transaction failed: ${err.message}`);
-      }
-      return;
-    }
-  } else {
-    showConfirmModal('Unlock Expansion Pack', 'Proceed with unlocking pack "' + itemId + '" on this device?', 'Store Purchase', async () => {
-      await applySuccessfulUnlock(itemId);
-    });
-  }
-}
-
-async function applySuccessfulUnlock(itemId) {
-  const previousPacks = [...selectedPacks];
-  try {
-    if (!unlockedItems.includes(itemId)) unlockedItems.push(itemId);
-    if (!selectedPacks.includes(itemId)) selectedPacks.push(itemId);
-    if (!useMemoryFallback && db) {
-      await db.unlocks.put({ id: itemId });
-      await db.settings.put({ key: 'selectedPacks', value: selectedPacks });
-    }
-    await triggerHaptic('success');
-    renderPackChoices();
-    refreshDecks();
-    initMatcher();
-    renderLibrary();
-    renderStore();
-    showToast('Expansion pack unlocked successfully!');
-  } catch (err) {
-    unlockedItems = unlockedItems.filter(id => id !== itemId);
-    selectedPacks = previousPacks;
-    showToast('Could not save pack unlock state locally.');
-  }
-}
-
-async function restorePurchases() {
-  if (window.Capacitor && window.Capacitor.isNativePlatform() && Purchases) {
-    try {
-      showToast('Restoring transactions with store...');
-      const customerInfo = await Purchases.restorePurchases();
-      const activeEntitlements = customerInfo.entitlements.active;
-      let restoredCount = 0;
-
-      for (const pack of storeCatalog) {
-        if ((activeEntitlements[pack.id]?.isActive || activeEntitlements[ENTITLEMENT_IDS.ALL_EXPANSIONS]?.isActive) && !unlockedItems.includes(pack.id)) {
-          unlockedItems.push(pack.id);
-          if (!selectedPacks.includes(pack.id)) selectedPacks.push(pack.id);
-          restoredCount++;
-        }
-      }
-
-      if (!useMemoryFallback && db) {
-        await db.unlocks.clear();
-        if (unlockedItems.length) {
-          await db.unlocks.bulkPut(unlockedItems.map(id => ({ id })));
-        }
-        await db.settings.put({ key: 'selectedPacks', value: selectedPacks });
-      }
-
-      refreshDecks();
-      renderStore();
-      showToast(restoredCount > 0 ? `Restored ${restoredCount} expansion pack(s)!` : 'No previous purchases found.');
-      return;
-    } catch (err) {
-      showToast(`Restore failed: ${err.message}`);
-      return;
-    }
-  }
-  showToast('Purchase restoration is managed automatically through store bindings.');
-}
-
 function renderTracker() {
   const label = getEl('dateGoalStatus');
   const bar = getEl('dateGoalBar');
@@ -1316,7 +1063,22 @@ function renderHistory() {
     detail.className = 'library-detail';
     const ratingText = entry.rating1 || entry.rating2 ? `Ratings: ${entry.rating1 ?? '—'}/5 & ${entry.rating2 ?? '—'}/5` : '';
     detail.textContent = [entry.note || entry.detail || '', ratingText].filter(Boolean).join(' · ');
-    row.append(category, title, detail);
+    const actions = document.createElement('div');
+    actions.className = 'history-entry-actions';
+    const editButton = document.createElement('button');
+    editButton.type = 'button';
+    editButton.className = 'history-edit-btn';
+    editButton.textContent = 'Edit';
+    editButton.setAttribute('aria-label', `Edit scrapbook entry ${entry.title || 'Untitled date'}`);
+    editButton.addEventListener('click', () => editHistoryEntry(entry.syncId));
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'history-delete-btn';
+    deleteButton.textContent = 'Delete';
+    deleteButton.setAttribute('aria-label', `Delete scrapbook entry ${entry.title || 'Untitled date'}`);
+    deleteButton.addEventListener('click', () => deleteHistoryEntry(entry.syncId));
+    actions.append(editButton, deleteButton);
+    row.append(category, title, detail, actions);
     list.appendChild(row);
   });
 }
@@ -1331,13 +1093,19 @@ async function persistHistoryEntry(entry, broadcast = false) {
 
   let saved = normalized;
 
-  if (!useMemoryFallback && db) {
+  if (storageFailed) {
+    showToast('Storage failure: Your scrapbook entry cannot be saved to disk.');
+    return null;
+  }
+
+  if (db) {
     try {
       const insertedId = await db.history.add(normalized);
       saved = await db.history.get(insertedId) || normalized;
     } catch (err) {
-      console.warn('Could not persist to IndexedDB; keeping this entry in memory:', err);
-      useMemoryFallback = true;
+      console.warn('Could not persist to IndexedDB:', err);
+      showToast('Storage error: Entry was not saved to disk.');
+      return null;
     }
   }
 
@@ -1353,6 +1121,49 @@ async function persistHistoryEntry(entry, broadcast = false) {
   return saved;
 }
 
+async function editHistoryEntry(syncId) {
+  const entry = dateHistory.find(record => record.syncId === syncId);
+  if (!entry) { showToast('That scrapbook entry could not be found.'); return; }
+  const nextTitle = window.prompt('Edit date title:', entry.title || 'Untitled date');
+  if (nextTitle === null) return;
+  const nextNote = window.prompt('Edit memory note:', entry.note || '');
+  if (nextNote === null) return;
+  const updated = { ...entry, title: limitText(nextTitle, 160) || 'Untitled date', note: limitText(nextNote, 2000) };
+  try {
+    if (!storageFailed && db) {
+      const stored = (await db.history.toArray()).find(record => record.syncId === syncId);
+      if (stored && stored.id !== undefined) await db.history.put({ ...stored, ...updated });
+    }
+    dateHistory = dateHistory.map(record => record.syncId === syncId ? updated : record);
+    renderHistory();
+    showToast('Scrapbook entry updated.');
+  } catch (error) {
+    console.error('Scrapbook edit failed:', error);
+    showToast('Could not save this edit.');
+  }
+}
+
+async function deleteHistoryEntry(syncId) {
+  const entry = dateHistory.find(record => record.syncId === syncId);
+  if (!entry) return;
+  showConfirmModal('Delete Scrapbook Entry?', `Delete “${entry.title || 'Untitled date'}” from your scrapbook? This cannot be undone.`, 'Scrapbook', async () => {
+    try {
+      if (!storageFailed && db) {
+        const matches = (await db.history.toArray()).filter(record => record.syncId === syncId);
+        for (const record of matches) {
+          if (record.id !== undefined) await db.history.delete(record.id);
+        }
+      }
+      dateHistory = dateHistory.filter(record => record.syncId !== syncId);
+      renderHistory();
+      showToast('Scrapbook entry deleted.');
+    } catch (error) {
+      console.error('Scrapbook deletion failed:', error);
+      showToast('Could not delete this scrapbook entry.');
+    }
+  });
+}
+
 async function receiveHistoryEntry(entry) {
   const normalized = sanitizeHistoryEntry(entry);
   if (!normalized) return null;
@@ -1365,7 +1176,7 @@ async function applyTheme(theme) {
   document.documentElement.dataset.theme = appSettings.theme === 'dark' ? '' : appSettings.theme;
   const select = getEl('themeSelect');
   if (select) select.value = appSettings.theme;
-  if (!useMemoryFallback && db) {
+  if (!storageFailed && db) {
     try { await db.settings.put({ key: 'appSettings', value: appSettings }); }
     catch (err) { console.error('Could not save theme:', err); }
   }
@@ -1373,22 +1184,21 @@ async function applyTheme(theme) {
 
 async function saveFeedbackSettings(value) {
   appSettings.feedback = ['both', 'sound', 'vibration', 'off'].includes(value) ? value : 'both';
-  if (!useMemoryFallback && db) {
+  if (!storageFailed && db) {
     try { await db.settings.put({ key: 'appSettings', value: appSettings }); }
     catch (err) { console.error('Could not save feedback preference:', err); }
   }
 }
 
-function shareCurrentDate() {
+async function shareCurrentDate() {
   const item = window.currentWinner;
   if (!item) { showToast('Choose a date idea first.'); return; }
   const text = `💞 Date Night Decider: ${item.title}\n${item.detail}`;
-  if (navigator.share) {
-    navigator.share({ title: item.title, text }).catch(() => {});
-  } else if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text)
-      .then(() => showToast('Date idea copied to clipboard!'))
-      .catch(() => showToast('Shared: ' + item.title));
+
+  const res = await window.DeviceAdapter.shareText('Date Night Decider', text, window.location.href);
+  if (res.success) {
+    if (res.method === 'clipboard') showToast('Date idea copied to clipboard!');
+    else showToast('Shared: ' + item.title);
   } else {
     showToast('Shared: ' + item.title);
   }
@@ -1422,29 +1232,89 @@ function startSelectedDate() {
 
 async function exportBackup() {
   const data = {
-    version: '3.1.2',
-    customDeck,
+    version: "3.4.3-hotfix8",
     deletedBuiltins: [...deletedBuiltins],
     dateHistory,
     settings: appSettings,
-    unlockedItems,
     selectedPacks: [...selectedPacks],
-    selectedCategories: [...document.querySelectorAll('.category-choice:checked')].map(input => input.value)
+    selectedCategories: [...document.querySelectorAll(".category-choice:checked")].map(input => input.value)
   };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = 'date-night-backup.json';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const backupText = JSON.stringify(data, null, 2);
+
+  try {
+    const capacitor = window.Capacitor;
+    if (capacitor && typeof capacitor.isNativePlatform === "function" && capacitor.isNativePlatform()) {
+      if (
+        typeof capacitor.isPluginAvailable === "function" &&
+        !capacitor.isPluginAvailable("FileSharer")
+      ) {
+        throw new Error("Native file-save plugin is unavailable. Sync and rebuild Android.");
+      }
+
+      const plugins = capacitor.Plugins || {};
+      const fileSharer = window.__DND_BACKUP_FILESHARER__ ||
+        plugins.FileSharer ||
+        (typeof capacitor.registerPlugin === "function"
+          ? capacitor.registerPlugin("FileSharer")
+          : null);
+
+      if (!fileSharer || typeof fileSharer.save !== "function") {
+        throw new Error("Native file-save API is unavailable.");
+      }
+
+      const bytes = new TextEncoder().encode(backupText);
+      let binary = "";
+      const chunkSize = 0x8000;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+
+      const saved = await fileSharer.save({
+        filename: "date-night-backup.json",
+        contentType: "application/json",
+        base64Data: btoa(binary),
+        android: {
+          saveDirectory: "downloads",
+          relativePath: "Download/Date Night Decider"
+        }
+      });
+
+      if (!saved) {
+        throw new Error("The file-save plugin did not confirm a save.");
+      }
+
+      showToast("Backup saved to Downloads/Date Night Decider/date-night-backup.json.");
+      return;
+    }
+
+    const blob = new Blob([backupText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "date-night-backup.json";
+    document.body.appendChild(anchor);
+
+    try {
+      anchor.click();
+      showToast("Backup download requested.");
+    } finally {
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+  } catch (error) {
+    console.error("Backup export failed:", error);
+    showToast("Backup export failed. Please try again.");
+  }
 }
 
 function importBackupFile(event) {
-  const file = event.target.files?.[0];
+  const file = event && event.target && event.target.files ? event.target.files[0] : null;
   if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    showToast('Backup file is too large. Choose a JSON backup no larger than 10 MB.');
+    event.target.value = '';
+    return;
+  }
 
   const reader = new FileReader();
 
@@ -1454,8 +1324,8 @@ function importBackupFile(event) {
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
         throw new Error('Backup must be a JSON object.');
       }
-      if (!data.version || !Array.isArray(data.dateHistory)) {
-        throw new Error('Invalid backup file structure.');
+      if (typeof data.version !== 'string' || !Array.isArray(data.dateHistory)) {
+        throw new Error('Invalid or unsupported backup file structure/version.');
       }
 
       const importedSettings = {
@@ -1463,29 +1333,24 @@ function importBackupFile(event) {
         feedback: ['both', 'sound', 'vibration', 'off'].includes(data.settings?.feedback) ? data.settings.feedback : appSettings.feedback
       };
 
-      const importedCustomDeck = sanitizeCardDeck(
-        Array.isArray(data.customDeck) ? data.customDeck : customDeck
-      );
-
+      const seenHistorySyncIds = new Set();
       const importedHistory = data.dateHistory
         .slice(0, 5000)
         .map(sanitizeHistoryEntry)
-        .filter(Boolean)
+        .filter(entry => {
+          if (!entry || seenHistorySyncIds.has(entry.syncId)) return false;
+          seenHistorySyncIds.add(entry.syncId);
+          return true;
+        })
         .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-      const importedUnlocks = [...new Set(
-        (Array.isArray(data.unlockedItems) ? data.unlockedItems : unlockedItems)
-          .filter(id => typeof id === 'string' && expansionDecks[id])
-      )];
-
-      const importedPacks = [...new Set(
-        (Array.isArray(data.selectedPacks) ? data.selectedPacks : ['starter', ...importedUnlocks])
-          .filter(id => id === 'starter' || importedUnlocks.includes(id))
-      )];
+      const importedUnlocks = [...new Set(unlockedItems.filter(id => typeof id === 'string' && window.expansionDecks && window.expansionDecks[id]))];
+      const requestedPacks = Array.isArray(data.selectedPacks) ? data.selectedPacks : ['starter', ...importedUnlocks];
+      const importedPacks = [...new Set(requestedPacks.filter(id => id === 'starter' || importedUnlocks.includes(id)))];
 
       const knownCardIds = new Set([
         ...masterDeck,
-        ...Object.values(expansionDecks).flat()
+        ...(window.expansionDecks ? Object.values(window.expansionDecks).flat() : [])
       ].map(card => card.id));
 
       const importedDeleted = [...new Set(
@@ -1498,38 +1363,31 @@ function importBackupFile(event) {
           .filter(value => typeof value === 'string' && DEFAULT_CATEGORIES.includes(value))
       )];
 
-      if (!useMemoryFallback && db) {
-        await db.transaction(
-          'rw',
-          db.settings,
-          db.customDeck,
-          db.deletedBuiltins,
-          db.categories,
-          db.history,
-          db.unlocks,
+      if (!storageFailed && db) {
+        await window.DNDStorage.withDatabaseTransaction(
+          [
+            db.settings,
+            db.customDeck,
+            db.deletedBuiltins,
+            db.categories,
+            db.history,
+            db.unlocks
+          ],
           async () => {
             await db.settings.clear();
             await db.settings.put({ key: 'appSettings', value: importedSettings });
             await db.settings.put({ key: 'selectedPacks', value: importedPacks });
-
             await db.customDeck.clear();
-            if (importedCustomDeck.length) {
-              await db.customDeck.bulkAdd(importedCustomDeck.map(item => ({ item })));
-            }
-
             await db.deletedBuiltins.clear();
             if (importedDeleted.length) {
               await db.deletedBuiltins.bulkPut(importedDeleted.map(id => ({ id })));
             }
-
             await db.categories.clear();
             await db.categories.put({ id: 'selectedCats', values: importedCategories });
-
             await db.history.clear();
             if (importedHistory.length) {
               await db.history.bulkAdd(importedHistory);
             }
-
             await db.unlocks.clear();
             if (importedUnlocks.length) {
               await db.unlocks.bulkPut(importedUnlocks.map(id => ({ id })));
@@ -1539,7 +1397,6 @@ function importBackupFile(event) {
       }
 
       appSettings = importedSettings;
-      customDeck = importedCustomDeck;
       dateHistory = importedHistory;
       unlockedItems = importedUnlocks;
       selectedPacks = importedPacks;
@@ -1550,22 +1407,17 @@ function importBackupFile(event) {
         input.checked = selectedCategories.includes(input.value);
       });
 
-      const budgetFilter = getEl('budgetFilter');
-      if (budgetFilter && !['all', 'free', 'paid'].includes(budgetFilter.value)) {
-        budgetFilter.value = 'all';
-      }
-
       renderPackChoices();
       refreshDecks();
       await applyTheme(appSettings.theme || 'dark');
       initMatcher();
       renderHistory();
-      renderStore();
+      if (typeof renderStore === 'function') renderStore();
       renderLibrary();
       showToast('Backup restored successfully.');
     } catch (error) {
       console.error('Backup import failed:', error);
-      showToast('Backup was not restored. It may be invalid or storage may be unavailable.');
+      showToast('Backup was not restored.');
     } finally {
       event.target.value = '';
     }
@@ -1574,38 +1426,105 @@ function importBackupFile(event) {
   reader.readAsText(file);
 }
 
-/* Guideline 5.1.1 Compliance: Clear User Data API */
 async function clearAllData() {
-  showConfirmModal('Clear Application Data?', 'Are you sure you want to clear all history, ratings, custom cards, and unlocked settings? This cannot be undone.', 'Danger Zone', async () => { executeClearAllData(); });
+  showConfirmModal('Clear Application Data?', 'This permanently clears local scrapbook entries, filters, theme, and feedback settings. Verified store purchases are not deleted and can be restored. This cannot be undone.', 'Danger Zone', async () => { await executeClearAllData(); });
 }
 
-async function executeClearAllData() {
+function resetInMemoryAfterClear() {
+  deletedBuiltins = new Set();
+  dateHistory = [];
+  window.currentWinner = null;
+  selectedPreviewItemId = null;
+  swipeLocked = false;
+  document.querySelectorAll('.modal-overlay.show').forEach(modal => modal.classList.remove('show'));
+  appSettings = { theme: 'dark', feedback: 'both' };
+  selectedCategories = [...DEFAULT_CATEGORIES];
+  savedSelectedPacksPreference = null;
+  selectedPacks = ['starter', ...unlockedItems];
+  activeDeck = [];
+  fullDeck = [];
+  p1Deck = [];
+  p2Deck = [];
+  p1Likes = [];
+  p2Likes = [];
+  swipeIndex = 0;
+  swipePlayer = 1;
+  draftItems = [];
+  draftTurn = 1;
+  p1Rating = 5;
+  p2Rating = 5;
+  document.querySelectorAll('.category-choice').forEach(input => { input.checked = true; });
+  const budget = getEl('budgetFilter'); if (budget) budget.value = 'all';
+  const feedback = getEl('feedbackSelect'); if (feedback) feedback.value = 'both';
+  const theme = getEl('themeSelect'); if (theme) theme.value = 'dark';
+}
+
+async function executeClearAllData({ broadcast = true } = {}) {
+  if (window.__dndClearDataInProgress) return;
+  window.__dndClearDataInProgress = true;
+  let fenceRequested = false;
+  let resetCompleted = false;
 
   try {
-    if (!useMemoryFallback && db) {
-      await db.settings.clear();
-      await db.customDeck.clear();
-      await db.deletedBuiltins.clear();
-      await db.categories.clear();
-      await db.history.clear();
-      await db.unlocks.clear();
+    const storage = window.DNDStorage;
+    if (!storage || typeof storage.clearPersistentStorage !== 'function') {
+      throw new Error('The verified persistent-storage reset coordinator is unavailable.');
     }
-    customDeck = [];
-    deletedBuiltins = new Set();
-    unlockedItems = [];
-    dateHistory = [];
-    selectedPacks = ['starter'];
-    selectedCategories = [...DEFAULT_CATEGORIES];
+    if (typeof window.beginP2PResetFence !== 'function' ||
+        typeof window.releaseP2PResetFence !== 'function' ||
+        typeof window.endLiveRoomGracefully !== 'function') {
+      throw new Error('Required reset or live-room shutdown support is unavailable.');
+    }
 
-    renderPackChoices();
-    refreshDecks();
-    initMatcher();
-    renderHistory();
-    renderStore();
-    renderLibrary();
-    showToast('All local data cleared successfully.');
+    // Stop new room activity first; persist the reset intent before awaiting
+    // graceful room shutdown by running shutdown inside the coordinator hook.
+    window.beginP2PResetFence();
+    fenceRequested = true;
+
+    const diagnostics = await storage.clearPersistentStorage({
+      beforeClear: async () => {
+        const roomEnd = await window.endLiveRoomGracefully('reset');
+        if (roomEnd && roomEnd.notified && !roomEnd.acknowledged) {
+          console.warn('Live-room shutdown was not acknowledged before reset; remote retry suppression is not confirmed.');
+        }
+      }
+    });
+
+    if (!diagnostics || diagnostics.resetCompleted !== true) {
+      const reasons = Array.isArray(diagnostics && diagnostics.errors) ? diagnostics.errors.join(' ') : '';
+      throw new Error('The persistent reset was not verified as complete. ' + reasons);
+    }
+    resetCompleted = true;
+
+    if (broadcast && typeof dataResetChannel !== 'undefined' && dataResetChannel) {
+      dataResetChannel.postMessage({ type: 'CLEAR_ALL_DATA' });
+    }
+    // Reload this tab too: rebuild in-memory state from the now-empty database
+    // and re-check external purchase entitlements rather than keeping stale state.
+    window.location.reload();
   } catch (err) {
-    showToast('Failed to clear local application storage.');
+    console.error('Failed to complete coordinated local-data reset:', err);
+    showToast('Clear was not confirmed complete. If recovery is pending, the app will reload to retry it.');
+
+    let pending = true;
+    try {
+      const storage = window.DNDStorage;
+      pending = !storage ||
+        typeof storage.hasPendingResetMarker !== 'function' ||
+        storage.hasPendingResetMarker();
+    } catch (_) {
+      pending = true;
+    }
+
+    if (resetCompleted || pending) {
+      window.setTimeout(() => window.location.reload(), 0);
+      return;
+    }
+
+    if (fenceRequested) {
+      window.releaseP2PResetFence();
+    }
+    window.__dndClearDataInProgress = false;
   }
 }
 
@@ -1694,6 +1613,7 @@ function showModal(eyebrow, title, detail) {
 
   const decisionModal = getEl('decisionModal');
   if (decisionModal) decisionModal.classList.add('show');
+  if (typeof saveHostRoomSessionState === 'function') saveHostRoomSessionState();
 }
 
 function resetRemoteRound() {
@@ -1705,6 +1625,8 @@ function resetRemoteRound() {
   swipePlayer = 1;
   remoteSubmitSent = false;
   remotePartnerLikes = null;
+  remoteGuestProgressLikes = [];
+  remoteGuestSwipeIndex = 0;
   remoteMatchResolved = false;
   window.currentWinner = null;
   draftItems = [];
@@ -1737,18 +1659,16 @@ function validRating(value) {
 async function completeCurrentDate() {
   const item = window.currentWinner;
   if (!item) { closeModal(); return; }
-  
-  p1Rating = 5;
-  p2Rating = 5;
-  setRating(1, 5);
-  setRating(2, 5);
-  
+
+  setRating(1, validRating(p1Rating) || 5);
+  setRating(2, validRating(p2Rating) || 5);
+
   const noteInput = getEl('logDateNoteInput');
   if (noteInput) noteInput.value = '';
-  
+
   const titleEl = getEl('logDateItemTitle');
   if (titleEl) titleEl.textContent = item.title || 'Untitled date';
-  
+
   const modal = getEl('logDateModal');
   if (modal) modal.classList.add('show');
 }
@@ -1767,504 +1687,9 @@ function downloadCalendarEvent() {
   if (modal) modal.classList.add('show');
 }
 
-function normalizeRoomCode(raw) {
-  return String(raw || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 64);
-}
-
-function generateRoomCode() {
-  try {
-    const bytes = new Uint8Array(16);
-    window.crypto.getRandomValues(bytes);
-    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-  } catch (_) {
-    return createUniqueId().replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 32);
-  }
-}
-
-function roomPeerId(code) {
-  return `datenight-${code}`;
-}
-
-function copyInviteLink() {
-  if (!remoteRoomId || myPlayerNum !== 1 || !peer || !peer.open) {
-    showToast('Start a live room and wait until the room is ready before copying its invite link.');
-    return;
-  }
-
-  const invite = new URL(window.location.pathname, window.location.origin);
-  invite.searchParams.set('room', remoteRoomId);
-  const link = invite.href;
-
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(link)
-      .then(() => showToast('Invite link copied to clipboard!'))
-      .catch(() => showToast('Link ready: ' + link));
-  } else {
-    showToast('Link ready: ' + link);
-  }
-}
-
-async function startP2PServer(presetCode = null) {
-  if (!presetCode) {
-    openLiveRoomModal('host');
-    return;
-  }
-  const raw = presetCode;
-  if (!raw) return;
-  const code = normalizeRoomCode(raw);
-  if (code.length < 12) {
-    showToast('Use a room code at least 12 characters long.');
-    return;
-  }
-
-  if (typeof window.Peer !== 'function') { showToast('PeerJS did not load. Check your connection and reload.'); return; }
-  
-  // Securely fetch dynamic ephemeral ICE servers before starting PeerJS session
-  const dynamicIceServers = await fetchEphemeralIceServers();
-  PEER_OPTIONS.config.iceServers = dynamicIceServers;
-
-  cleanupPeerConnection();
-  remoteRoomId = code;
-  myPlayerNum = 1;
-  currentRoomPeerId = roomPeerId(code);
-  connectionState = 'creating';
-  resetRemoteRound();
-  try {
-    peer = new Peer(currentRoomPeerId, PEER_OPTIONS);
-
-    peer.on('disconnected', () => {
-      connectionState = 'disconnected';
-      try { peer.reconnect(); } catch (_) {}
-    });
-
-    peer.on('open', () => {
-      connectionState = 'waiting';
-      showToast(`Room “${code}” is ready as Player 1. Share your invite link!`);
-      updateConnectionBanner();
-    });
-    
-    peer.on('connection', incoming => {
-      if (conn && conn.open) {
-        incoming.close();
-        showToast('A partner is already connected to this room.');
-        return;
-      }
-      connectionState = 'connecting';
-      conn = incoming;
-      setupConnectionHandlers(conn);
-      conn.on('open', () => {
-        connectionState = 'connected';
-        sendRoomState();
-        startHeartbeat();
-        showToast('Partner connected. The live room is synchronized.');
-        updateSwipeCard();
-      });
-    });
-
-    peer.on('error', error => {
-      connectionState = 'disconnected';
-      if (error.type === 'network' || error.type === 'socket-closed') {
-        try { peer.reconnect(); } catch (_) {}
-      } else if (error.type === 'unavailable-id') {
-        showToast('That room code is already in use. Choose a different code.');
-      } else {
-        showToast(`Room error: ${error.type || 'Connection failed'}`);
-      }
-      updateConnectionBanner();
-    });
-  } catch (error) {
-    connectionState = 'disconnected';
-    cleanupPeerConnection();
-    showToast('Could not start live room.');
-  }
-}
-
-async function joinP2PServer(presetCode = null) {
-  if (!presetCode) {
-    openLiveRoomModal('join');
-    return;
-  }
-  const raw = presetCode;
-  if (!raw) return;
-  const code = normalizeRoomCode(raw);
-  if (code.length < 12) {
-    showToast('Enter a room code at least 12 characters long.');
-    return;
-  }
-
-  if (typeof window.Peer !== 'function') { showToast('PeerJS did not load. Check your connection and reload.'); return; }
-
-  // Securely fetch dynamic ephemeral ICE servers before joining PeerJS session
-  const dynamicIceServers = await fetchEphemeralIceServers();
-  PEER_OPTIONS.config.iceServers = dynamicIceServers;
-
-  cleanupPeerConnection();
-  remoteRoomId = code;
-  myPlayerNum = 2;
-  currentRoomPeerId = roomPeerId(code);
-  connectionState = 'connecting';
-  try {
-    peer = new Peer(PEER_OPTIONS);
-
-    peer.on('disconnected', () => {
-      connectionState = 'disconnected';
-      try { peer.reconnect(); } catch (_) {}
-    });
-
-    peer.on('open', () => {
-      conn = peer.connect(currentRoomPeerId, { reliable: true });
-      setupConnectionHandlers(conn);
-      conn.on('open', () => {
-        connectionState = 'connected';
-        showToast(`Connected to room “${code}” as Player 2. Waiting for host's shared deck…`);
-        startHeartbeat();
-        updateSwipeCard();
-      });
-    });
-
-    peer.on('error', error => {
-      connectionState = 'disconnected';
-      if (error.type === 'network' || error.type === 'socket-closed') {
-        try { peer.reconnect(); } catch (_) {}
-      } else {
-        showToast(`Join error: ${error.type || 'Could not connect'}`);
-      }
-      updateConnectionBanner();
-    });
-  } catch (error) {
-    connectionState = 'disconnected';
-    cleanupPeerConnection();
-    showToast('Could not join live room.');
-  }
-}
-
-function startHeartbeat() {
-  if (p2HeartbeatTimer) window.clearInterval(p2HeartbeatTimer);
-  p2HeartbeatTimer = window.setInterval(() => {
-    if (conn && conn.open) {
-      sendP2PMessage({ type: 'PING', timestamp: Date.now() });
-    }
-  }, 10000);
-}
-
-function leaveLiveRoom() {
-  if (!remoteRoomId) {
-    showToast('You are not currently in a live room.');
-    return;
-  }
-  showConfirmModal('Leave Live Room?', 'Are you sure you want to leave the live couple room and return to local play mode?', 'Live Sync', () => {
-    cleanupPeerConnection();
-    refreshDecks();
-    initMatcher();
-    showToast('Returned to local play mode.');
-  });
-}
-
-function cleanupPeerConnection() {
-  if (p2HeartbeatTimer) {
-    window.clearInterval(p2HeartbeatTimer);
-    p2HeartbeatTimer = null;
-  }
-  try { if (conn) conn.close(); } catch (_) {}
-  try { if (peer) peer.destroy(); } catch (_) {}
-  conn = null;
-  peer = null;
-  remoteRoomId = null;
-  currentRoomPeerId = null;
-  myPlayerNum = 1;
-  remoteSubmitSent = false;
-  remotePartnerLikes = null;
-  remoteMatchResolved = false;
-  connectionState = 'disconnected';
-  guestRoundId = null;
-  pendingCompleteEntry = null;
-
-  const completeButton = getEl('completeDateBtn');
-  if (completeButton) completeButton.disabled = !window.currentWinner;
-
-  updateSwipeCard();
-}
-
-function sendP2PMessage(payload) {
-  if (!conn || !conn.open) return false;
-  try { conn.send(payload); return true; }
-  catch (error) { console.error('Could not send live-room message:', error); return false; }
-}
-
-function sendRoomState() {
-  if (!remoteRoomId || myPlayerNum !== 1 || !conn || !conn.open) return;
-
-  const budgetFilterEl = getEl('budgetFilter');
-  sendP2PMessage({
-    type: 'SYNC_STATE',
-    matcherDeck: p1Deck,
-    hostFilters: {
-      categories: [...document.querySelectorAll('.category-choice:checked')].map(input => input.value),
-      packs: [...selectedPacks],
-      budget: budgetFilterEl ? budgetFilterEl.value : 'all'
-    }
-  });
-}
-
-function tryResolveRemoteMatch() {
-  if (!remoteRoomId || myPlayerNum !== 1) return false;
-  if (remoteMatchResolved) return false;
-  if (!Array.isArray(remotePartnerLikes)) return false;
-  if (swipeIndex < p1Deck.length) return false;
-
-  const partnerLikeIds = new Set(remotePartnerLikes.filter(item => item && item.id).map(item => item.id));
-  const mutual = p1Likes.filter(item => partnerLikeIds.has(item.id));
-
-  remoteMatchResolved = true;
-  handleMatchOutcome(mutual);
-  return true;
-}
-
-function setupConnectionHandlers(thisConn) {
-  if (!thisConn) return;
-
-  thisConn.on('data', message => {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'PING') return;
-
-    if (message.type === 'SYNC_STATE' && myPlayerNum === 2) {
-      if (!Array.isArray(message.matcherDeck)) return;
-
-      const sharedDeck = sanitizeCardDeck(message.matcherDeck);
-      p1Deck = [...sharedDeck];
-      p2Deck = [...sharedDeck];
-
-      p1Likes = [];
-      p2Likes = [];
-      swipeIndex = 0;
-      swipePlayer = 1;
-      remoteSubmitSent = false;
-      remotePartnerLikes = null;
-      remoteMatchResolved = false;
-      window.currentWinner = null;
-      draftItems = [];
-
-      const decisionModal = getEl('decisionModal');
-      const votingModal = getEl('votingModal');
-      if (decisionModal) decisionModal.classList.remove('show');
-      if (votingModal) votingModal.classList.remove('show');
-
-      if (message.hostFilters && typeof message.hostFilters === 'object') {
-        const hostFilters = message.hostFilters;
-        if (Array.isArray(hostFilters.categories)) {
-          const categorySet = new Set(
-            hostFilters.categories.filter(value => DEFAULT_CATEGORIES.includes(value))
-          );
-          document.querySelectorAll('.category-choice').forEach(input => {
-            input.checked = categorySet.has(input.value);
-          });
-        }
-        if (Array.isArray(hostFilters.packs)) {
-          selectedPacks = [...new Set(hostFilters.packs.filter(value =>
-            value === 'starter' || Object.prototype.hasOwnProperty.call(expansionDecks, value)
-          ))];
-          renderPackChoices();
-        }
-        if (['all', 'free', 'paid'].includes(hostFilters.budget)) {
-          const budgetEl = getEl('budgetFilter');
-          if (budgetEl) budgetEl.value = hostFilters.budget;
-        }
-      }
-
-      updateSwipeCard();
-      return;
-    }
-
-    if (message.type === 'NEW_ROUND' && myPlayerNum === 2) {
-      const decisionModal = getEl('decisionModal');
-      const votingModal = getEl('votingModal');
-      if (decisionModal) decisionModal.classList.remove('show');
-      if (votingModal) votingModal.classList.remove('show');
-      window.currentWinner = null;
-      remoteSubmitSent = false;
-      return;
-    }
-
-    if (message.type === 'SUBMIT_SWIPES' && myPlayerNum === 1) {
-      remotePartnerLikes = sanitizeCardDeck(message.likedCards);
-      tryResolveRemoteMatch();
-      updateSwipeCard();
-      return;
-    }
-
-    if (message.type === 'MATCH_WINNER' && myPlayerNum === 2) {
-      const winnerId = limitText(message.winnerId, 80);
-      const winner = p2Deck.find(item => item.id === winnerId) || fullDeck.find(item => item.id === winnerId);
-      if (winner) {
-        const votingModal = getEl('votingModal');
-        if (votingModal) votingModal.classList.remove('show');
-        window.currentWinner = winner;
-        showModal('It’s a Match!', winner.title, winner.detail);
-      }
-      return;
-    }
-
-    if (message.type === 'NO_MUTUAL_MATCHES' && myPlayerNum === 2) {
-      showNoMutualMatches();
-      return;
-    }
-
-    if (message.type === 'REQUEST_NEW_ROUND' && myPlayerNum === 1) {
-      restartMatcherAfterNoMatch();
-      return;
-    }
-
-    if (message.type === 'REQUEST_FILTER_CHANGE' && myPlayerNum === 1) {
-      const votingModal = getEl('votingModal');
-      if (votingModal) votingModal.classList.remove('show');
-      const actions = getEl('noMatchesActions');
-      if (actions) actions.hidden = true;
-      const picker = getEl('categoryPicker');
-      if (picker) picker.open = true;
-      const summary = getEl('categorySummary');
-      if (summary) summary.focus();
-      showToast('Your partner requested a pack/category change. Adjust filters to restart the round.');
-      return;
-    }
-
-    if (message.type === 'MUTUAL_DRAFT_START' && myPlayerNum === 2) {
-      draftItems = sanitizeCardDeck(message.draftItems).map(item => ({
-        ...item,
-        banned: item.banned === true
-      }));
-      draftTurn = Number(message.draftTurn) === 2 ? 2 : 1;
-      const actions = getEl('noMatchesActions');
-      if (actions) actions.hidden = true;
-      const eyebrow = getEl('votingEyebrow');
-      const title = getEl('votingModalTitle');
-      if (eyebrow) eyebrow.textContent = 'Mutual Match Draft';
-      if (title) title.textContent = 'Take Turns Eliminating';
-      renderDraftGrid();
-      const modal = getEl('votingModal');
-      if (modal) modal.classList.add('show');
-      return;
-    }
-
-    if (message.type === 'BAN_REQUEST' && myPlayerNum === 1) {
-      if (draftTurn === 2 && Number.isInteger(message.index)) executeBan(message.index);
-      return;
-    }
-
-    if (message.type === 'DRAFT_STATE' && myPlayerNum === 2) {
-      draftItems = sanitizeCardDeck(message.draftItems).map(item => ({
-        ...item,
-        banned: item.banned === true
-      }));
-      draftTurn = Number(message.draftTurn) === 2 ? 2 : 1;
-      renderDraftGrid();
-      const remaining = draftItems.filter(item => !item.banned);
-      if (remaining.length === 1) {
-        window.currentWinner = remaining[0];
-        const votingModal = getEl('votingModal');
-        if (votingModal) votingModal.classList.remove('show');
-        showModal('Winner by Elimination!', remaining[0].title, remaining[0].detail);
-      }
-      return;
-    }
-
-    if (message.type === 'COMPLETE_DATE_REQUEST' && myPlayerNum === 1) {
-      const incomingEntry = sanitizeHistoryEntry(message.entry);
-      if (!incomingEntry) {
-        sendP2PMessage({
-          type: 'COMPLETE_DATE_ACK',
-          syncId: limitText(message.entry?.syncId, 120),
-          ok: false
-        });
-        return;
-      }
-
-      const alreadySaved = dateHistory.some(record => record.syncId === incomingEntry.syncId);
-      if (alreadySaved) {
-        sendP2PMessage({ type: 'COMPLETE_DATE_ACK', syncId: incomingEntry.syncId, ok: true });
-        return;
-      }
-
-      persistHistoryEntry(incomingEntry, true)
-        .then(saved => {
-          const ok = Boolean(saved);
-          sendP2PMessage({ type: 'COMPLETE_DATE_ACK', syncId: incomingEntry.syncId, ok });
-          if (ok) closeModal();
-        })
-        .catch(error => {
-          console.error('Could not save partner-completed date:', error);
-          sendP2PMessage({ type: 'COMPLETE_DATE_ACK', syncId: incomingEntry.syncId, ok: false });
-        });
-
-      return;
-    }
-
-    if (message.type === 'COMPLETE_DATE_ACK' && myPlayerNum === 2) {
-      if (!pendingCompleteEntry || message.syncId !== pendingCompleteEntry.syncId) return;
-
-      const entry = pendingCompleteEntry;
-      pendingCompleteEntry = null;
-
-      const completeButton = getEl('completeDateBtn');
-      if (completeButton) completeButton.disabled = !window.currentWinner;
-
-      if (message.ok === true) {
-        persistHistoryEntry(entry, false)
-          .then(() => {
-            closeModal();
-            showToast('Date completion confirmed and saved.');
-          })
-          .catch(error => {
-            console.error('Could not save the confirmed date locally:', error);
-          });
-      } else {
-        showToast('The host could not confirm the save.');
-      }
-
-      return;
-    }
-
-    if (message.type === 'HISTORY_ENTRY' && myPlayerNum === 2 && message.entry) {
-      receiveHistoryEntry(message.entry).catch(error => console.error('Could not receive history entry:', error));
-    }
-  });
-
-  thisConn.on('open', () => {
-    conn = thisConn;
-    connectionState = 'connected';
-    if (myPlayerNum === 2 && pendingCompleteEntry) {
-      sendP2PMessage({ type: 'COMPLETE_DATE_REQUEST', entry: pendingCompleteEntry });
-    }
-    updateSwipeCard();
-  });
-
-  thisConn.on('close', () => {
-    if (thisConn !== conn) return;
-    conn = null;
-    connectionState = 'disconnected';
-    remoteSubmitSent = false;
-    updateSwipeCard();
-
-    if (remoteRoomId && myPlayerNum === 2) {
-      showToast('Connection lost. Reconnecting to host...');
-      window.setTimeout(() => {
-        if (!remoteRoomId || myPlayerNum !== 2) return;
-        if (peer && !peer.destroyed) {
-          const newConn = peer.connect(currentRoomPeerId, { reliable: true });
-          setupConnectionHandlers(newConn);
-          newConn.on('open', () => {
-            connectionState = 'connected';
-            showToast('Reconnected to live room host!');
-            startHeartbeat();
-          });
-        }
-      }, 3000);
-    }
-  });
-}
-
 async function loadAppData() {
   try {
-    if (!useMemoryFallback && db) {
+    if (!storageFailed && db) {
       const settingsRecord = await db.settings.get('appSettings');
       if (settingsRecord?.value && typeof settingsRecord.value === 'object') {
         appSettings = {
@@ -2273,19 +1698,19 @@ async function loadAppData() {
         };
       }
 
-      const customRecords = await db.customDeck.toArray();
-      customDeck = sanitizeCardDeck(customRecords.map(record => record.item));
       const deletedRecords = await db.deletedBuiltins.toArray();
       deletedBuiltins = new Set(deletedRecords.map(record => record.id));
       dateHistory = (await db.history.orderBy('date').reverse().toArray())
         .map(sanitizeHistoryEntry)
         .filter(Boolean);
-      const unlockRecords = await db.unlocks.toArray();
-      unlockedItems = unlockRecords.map(record => record.id).filter(id => expansionDecks[id]);
+
       const selectedPacksRecord = await db.settings.get('selectedPacks');
-      selectedPacks = Array.isArray(selectedPacksRecord?.value)
-        ? [...new Set(selectedPacksRecord.value.filter(id => id === 'starter' || unlockedItems.includes(id)))]
-        : ['starter', ...unlockedItems];
+      savedSelectedPacksPreference = Array.isArray(selectedPacksRecord?.value)
+        ? [...new Set(selectedPacksRecord.value.filter(id => id === 'starter' || (window.expansionDecks && Object.prototype.hasOwnProperty.call(window.expansionDecks, id))))]
+        : null;
+      selectedPacks = Array.isArray(savedSelectedPacksPreference)
+        ? [...new Set(savedSelectedPacksPreference.filter(id => id === 'starter'))]
+        : ['starter'];
 
       const categoryRecord = await db.categories.get('selectedCats');
       selectedCategories = Array.isArray(categoryRecord?.values)
@@ -2293,7 +1718,7 @@ async function loadAppData() {
         : [...DEFAULT_CATEGORIES];
     }
   } catch (error) {
-    console.warn('Some saved data could not be loaded from IndexedDB; using defaults:', error);
+    console.warn('Saved data could not be loaded from IndexedDB:', error);
   }
 
   document.querySelectorAll('.category-choice').forEach(input => {
@@ -2301,71 +1726,221 @@ async function loadAppData() {
   });
   const feedbackSelect = getEl('feedbackSelect');
   if (feedbackSelect) feedbackSelect.value = appSettings.feedback;
-  
+
   renderPackChoices();
   refreshDecks();
   initMatcher();
   renderLibrary();
   renderHistory();
-  renderStore();
+  if (typeof renderStore === 'function') renderStore();
   await applyTheme(appSettings.theme || 'dark');
+  renderStorageWarning();
 
-  /* Native Boot Optimization: Hide Splash Screen after initial load */
-  if (window.Capacitor && window.Capacitor.isPluginAvailable('SplashScreen')) {
-    try {
-      await window.Capacitor.Plugins.SplashScreen.hide();
-    } catch (_) {}
+  if (typeof initializePurchases === 'function') {
+    await initializePurchases();
+  }
+
+  if (window.DeviceAdapter) {
+    await window.DeviceAdapter.hideSplashScreen();
   }
 
   const urlParams = new URLSearchParams(window.location.search);
   const roomParam = urlParams.get('room');
+
   if (roomParam) {
     window.setTimeout(() => {
       const code = normalizeRoomCode(roomParam);
-      if (code) {
-        joinP2PServer(code);
-      }
+      if (code) joinP2PServer(code);
     }, 500);
+  } else {
+    const savedGuestSession = readGuestRoomSession();
+    if (savedGuestSession) {
+      window.setTimeout(() => {
+        joinP2PServer(savedGuestSession.roomCode);
+      }, 700);
+    } else {
+      const savedHostSession = readHostRoomSession();
+      if (savedHostSession) {
+        window.setTimeout(() => {
+          startP2PServer(savedHostSession.roomCode, savedHostSession, 0);
+        }, 700);
+      }
+    }
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+let dataResetChannel = null;
+try {
+  if ('BroadcastChannel' in window) {
+    dataResetChannel = new BroadcastChannel('date-night-decider-data-events');
+    dataResetChannel.addEventListener('message', async event => {
+      if (!event.data || event.data.type !== 'CLEAR_ALL_DATA') return;
+      await resetOtherTabAfterClear();
+    });
+  }
+} catch (error) {
+  console.warn('Cross-tab data reset notifications unavailable:', error);
+}
+
+async function resetOtherTabAfterClear() {
+  // sessionStorage is tab-scoped: the originating tab cannot clear this tab's saved room.
+  try { cleanupPeerConnection(); } catch (_) {}
+  try {
+    const storage = window.DNDStorage;
+    if (!storage || typeof storage.clearCurrentTabSessionStorage !== 'function') {
+      throw new Error('Per-tab session reset coordinator is unavailable.');
+    }
+    storage.clearCurrentTabSessionStorage();
+  } catch (error) {
+    // Keep this tab blocked. Startup generation checks will retry session cleanup on reload.
+    renderStorageHardeningBlocker(error);
+    return;
+  }
+  window.location.reload();
+}
+
+function handleIncomingInviteFromUrl() {
+  const inviteUrl = new URL(window.location.href);
+  const rawCode = inviteUrl.searchParams.get('room');
+  if (!rawCode) return;
+
+  inviteUrl.searchParams.delete('room');
+  const nextUrl = inviteUrl.pathname + inviteUrl.search + inviteUrl.hash;
+  window.history.replaceState(window.history.state, document.title, nextUrl);
+
+  const code = normalizeRoomCode(rawCode).replace(/^datenight-/, '');
+  if (code.length < 12) {
+    showToast('This invitation link contains an invalid room code.');
+    return;
+  }
+
+  const joinInput = getEl('joinCodeInput');
+  if (joinInput) joinInput.value = code;
+  switchLiveRoomTab('join');
+
+  const modal = getEl('liveRoomModal');
+  if (modal) modal.classList.add('show');
+  showToast('Invitation detected. Review code and tap Connect.');
+}
+
+function renderStorageHardeningBlocker(error) {
+  console.error('Date Night Decider startup blocked by storage recovery:', error);
+  if (!document.body) return;
+
+  let banner = document.getElementById('storageHardeningBlocker');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'storageHardeningBlocker';
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText = 'position:relative;z-index:2147483647;margin:16px;padding:16px;border:2px solid #b91c1c;border-radius:12px;background:#450a0a;color:#fff;font:16px/1.5 sans-serif;';
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+  banner.textContent = 'Date Night Decider has blocked startup because database recovery could not be verified. Do not continue editing. Resolve the storage problem and reload. Details: ' + String(error && error.message || error || 'Unknown storage error');
+  document.querySelectorAll('button, input, select, textarea').forEach(control => { control.disabled = true; });
+  document.addEventListener('click', event => {
+    if (!banner.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+  document.addEventListener('keydown', event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+}
+
+async function initializeStorageAndLoad() {
+  if (window.dbReady && typeof window.dbReady.then === 'function') {
+    await window.dbReady;
+  }
+  const storage = window.DNDStorage;
+  if (!storage || typeof storage.captureCurrentGeneration !== 'function' ||
+      typeof storage.hasPendingResetMarker !== 'function') {
+    throw new Error('The database storage-hardening API is unavailable.');
+  }
+
+  if (storage.hasPendingResetMarker()) {
+    const recovery = await storage.clearPersistentStorage();
+    if (!recovery || recovery.resetCompleted !== true) {
+      const reasons = Array.isArray(recovery && recovery.errors) ? recovery.errors.join(' ') : '';
+      throw new Error('Interrupted reset recovery did not complete. ' + reasons);
+    }
+  }
+
+  // Capture the durable generation before loading state or allowing normal writes.
+  const currentGeneration = storage.captureCurrentGeneration();
+
+  // sessionStorage is per-tab and survives a page reload. If this tab belongs to
+  // an older reset generation (or predates this guard), clear old room/session keys
+  // before loadAppData can attempt an automatic P2P reconnect.
+  const sessionGenerationKey = 'dnd_session_state_generation';
+  let priorSessionGeneration;
+  try {
+    priorSessionGeneration = sessionStorage.getItem(sessionGenerationKey);
+  } catch (error) {
+    throw new Error('Per-tab session state could not be verified: ' + (error.message || error));
+  }
+  if (priorSessionGeneration !== String(currentGeneration)) {
+    storage.clearCurrentTabSessionStorage();
+  }
+  try {
+    sessionStorage.setItem(sessionGenerationKey, String(currentGeneration));
+    if (sessionStorage.getItem(sessionGenerationKey) !== String(currentGeneration)) {
+      throw new Error('Session generation verification failed.');
+    }
+  } catch (error) {
+    throw new Error('Per-tab session generation could not be recorded: ' + (error.message || error));
+  }
+
+  await loadAppData();
+  await handleIncomingInviteFromUrl();
+}
+
+function initializeApp() {
+  if (typeof installDelegatedActions === 'function') installDelegatedActions();
+  if (typeof installModalAccessibility === 'function') installModalAccessibility();
   installSwipeGestures();
+  renderStorageWarning();
+
+  if (window.DeviceAdapter) {
+    window.DeviceAdapter.registerBackButtonHandler(() => {
+      const openModals = document.querySelectorAll('.modal-overlay.show');
+      if (openModals.length) {
+        openModals.forEach(m => m.classList.remove('show'));
+      }
+    });
+  }
+
+  window.addEventListener('pointerdown', unlockAudioAfterGesture, { once: true, passive: true });
+  window.addEventListener('keydown', unlockAudioAfterGesture, { once: true });
 
   const swipeCard = getEl('swipeCard');
   swipeCard?.addEventListener('keydown', event => {
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault();
-      handleSwipe(false);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      handleSwipe(true);
-    }
+    if (event.key === 'ArrowLeft') { event.preventDefault(); handleSwipe(false); }
+    else if (event.key === 'ArrowRight') { event.preventDefault(); handleSwipe(true); }
   });
 
   const categoryPicker = getEl('categoryPicker');
   const categorySummary = getEl('categorySummary');
   if (categoryPicker && categorySummary) {
-    const syncExpandedState = () => {
-      categorySummary.setAttribute('aria-expanded', String(categoryPicker.open));
-    };
+    const syncExpandedState = () => categorySummary.setAttribute('aria-expanded', String(categoryPicker.open));
     categoryPicker.addEventListener('toggle', syncExpandedState);
     syncExpandedState();
   }
-
-  loadAppData().catch(error => {
-    console.error('App initialization failed:', error);
-  });
-});
-
-if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./service-worker.js').catch(error => console.warn('Service worker registration failed:', error));
-  });
+  initializeStorageAndLoad()
+    .catch(renderStorageHardeningBlocker);
 }
 
+if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', initializeApp, { once: true });
+else initializeApp();
 
-/* Custom In-App Modal System for Ratings, Calendar, Live Room, Legal, and Confirmations */
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('./service-worker.js?v=3.4.3-layout1').catch(error => console.warn('Service worker registration failed:', error));
+  }
+}
+if (document.readyState === 'complete') registerServiceWorker();
+else window.addEventListener('load', registerServiceWorker, { once: true });
 
 let p1Rating = 5, p2Rating = 5;
 
@@ -2399,10 +1974,10 @@ function closeLogDateModal() {
 async function saveLoggedDate() {
   const item = window.currentWinner;
   if (!item) { closeLogDateModal(); return; }
-  
+
   const noteInput = getEl('logDateNoteInput');
   const note = noteInput ? limitText(noteInput.value, 2000) : '';
-  
+
   const entry = sanitizeHistoryEntry({
     syncId: createUniqueId(),
     cardId: item.id || null,
@@ -2445,12 +2020,14 @@ async function saveLoggedDate() {
       return;
     }
 
-    await persistHistoryEntry(entry, true);
-    closeModal();
-    showToast('Date saved to scrapbook! ⭐');
+    const saved = await persistHistoryEntry(entry, true);
+    if (saved) {
+      closeModal();
+      showToast('Date saved to scrapbook! ⭐');
+    }
   } catch (error) {
     console.error('Could not save completed date:', error);
-    showToast('The date could not be saved. Please try again.');
+    showToast('The date could not be saved.');
   }
 }
 
